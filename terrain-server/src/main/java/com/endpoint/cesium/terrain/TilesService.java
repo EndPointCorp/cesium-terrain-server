@@ -7,14 +7,26 @@ import java.util.List;
 import com.endpoint.cesium.terrain.eleservice.ElevationService;
 import com.endpoint.cesium.terrain.eleservice.ElevationServiceTrace;
 import com.endpoint.cesium.terrain.eleservice.TerrariumElevationService;
+import com.endpoint.cesium.terrain.eleservice.OceanTestService;
 import com.endpoint.cesium.terrain.tiling.GeodeticTilingScema;
 
 public class TilesService {
 	
-	//private static final ElevationService eleService = new HGTElevationService();
 	private static final ElevationService eleService = new TerrariumElevationService();
 
 	public static final double VOID_VALUE = -1000.0;
+	
+	private static final OceanTestService waterService;
+	static {
+		String landSourcePath = TerrainServer.getConfig().getProperty("land.source");
+		
+		if (landSourcePath != null) {
+			waterService = new OceanTestService(landSourcePath);
+		}
+		else {
+			waterService = null;
+		}
+	}
 	
 	public Tile get(String format, int z, int x, int y) {
 		
@@ -29,9 +41,14 @@ public class TilesService {
 			if (ele == null) {
 				ele = VOID_VALUE;
 			}
+			
+			if (waterService != null) {
+				if (ele < 0.0 && !waterService.isLand(sample)) {
+					ele = 0.0;
+				}
+			}
 
 			eleSamples[i++] = ele; 
-			
 		}
 		
 		Tile tile = new Tile(eleSamples, bbox);

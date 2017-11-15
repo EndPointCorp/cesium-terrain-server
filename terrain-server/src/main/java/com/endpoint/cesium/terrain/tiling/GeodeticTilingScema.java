@@ -12,8 +12,8 @@ public class GeodeticTilingScema {
 	private static final double HeightDeg = 180.0;
 	
 	public static BBOX getBBOX(int z, int x, int y) {
-		int tilesXOnThisZ = ( 1 << z ) * ZERO_LEVEL_X_TILES;
-		int tilesYOnThisZ = ( 1 << z ) * ZERO_LEVEL_Y_TILES;
+		int tilesXOnThisZ = xTiles(z);
+		int tilesYOnThisZ = yTiles(z);
 		
 		double tileWidth = WidthDeg / tilesXOnThisZ;
 		double tileHeight = HeightDeg / tilesYOnThisZ;
@@ -23,10 +23,18 @@ public class GeodeticTilingScema {
 		
 		return new BBOX(tileX + tileWidth, tileX, tileY + tileHeight, tileY);
 	}
+
+	public static int yTiles(int z) {
+		return ( 1 << z ) * ZERO_LEVEL_Y_TILES;
+	}
+
+	public static int xTiles(int z) {
+		return ( 1 << z ) * ZERO_LEVEL_X_TILES;
+	}
 	
 	public static String getTMS(LonLat ll, int z) {
-		int tilesXOnThisZ = ( 1 << z ) * ZERO_LEVEL_X_TILES;
-		int tilesYOnThisZ = ( 1 << z ) * ZERO_LEVEL_Y_TILES;
+		int tilesXOnThisZ = xTiles(z);
+		int tilesYOnThisZ = yTiles(z);
 		
 		double tileWidth = WidthDeg / tilesXOnThisZ;
 		double tileHeight = HeightDeg / tilesYOnThisZ;

@@ -30,6 +30,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.endpoint.cesium.terrain.LonLat;
+import com.endpoint.cesium.terrain.TerrainServer;
 import com.endpoint.cesium.terrain.eleservice.util.SizedLinkedHashMap;
 
 public class FilesAccessService {
@@ -40,18 +41,30 @@ public class FilesAccessService {
 	 * 2. if not in cache - look for local file
 	 * 3. if it's not in local files cache, download and store 
 	 */
-	public static int CACHE_SIZE = 32;
-	
+	public static final int CACHE_SIZE;
+
 	// Internal in memory cache
-	private static final LRUMap<String, ByteBuffer> cache = new LRUMap<String, ByteBuffer>(CACHE_SIZE);
+	private static final LRUMap<String, ByteBuffer> cache;
+
+	// External files cache
+	private static final int CACHED_FILES;
+	
+	// Tiles files accessor
+	private static final FilesLayout FILES_LAYOUT;
+
+	static {
+		CACHE_SIZE = Integer.valueOf(TerrainServer.getConfig().getProperty("cache.tiles-in-memory.size", "32"));
+		cache = new LRUMap<String, ByteBuffer>(CACHE_SIZE);
+		
+		CACHED_FILES = Integer.valueOf(TerrainServer.getConfig().getProperty("cache.tiles-on-disc.size", "256"));
+		
+		String tilesPath = TerrainServer.getConfig().getProperty("cache.tiles.path", "tilescache");
+		FILES_LAYOUT = new TerrariumFilesLayout(new File(tilesPath));
+	}
+	
 	private static final Map<String, Future<ByteBuffer>> futures = new HashMap<>();
 	
-	private static final int CACHED_FILES = 65 * 65 * 4;
-	
-	//private static final HGTFilesLayout FILES_LAYOUT = new HGTFilesLayout(new File("/opt/ep/mapzen/hgt"));
-	private static final FilesLayout FILES_LAYOUT = new TerrariumFilesLayout(new File("/opt/ep/mapzen/terrarium"));
-	
-	private static final Set<String> USED_FILES_STATS = Collections.newSetFromMap(new SizedLinkedHashMap(CACHED_FILES));
+	private static final Set<String> usedFiles = Collections.newSetFromMap(new SizedLinkedHashMap(CACHED_FILES));
 	
 	private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 	static {
@@ -60,19 +73,19 @@ public class FilesAccessService {
 	
 	private static final ExecutorService fileReadES = Executors.newFixedThreadPool(4);
 	
-	private static final class ReadHgtFileTask implements Callable<ByteBuffer> {
+	private static final class ReadFileTask implements Callable<ByteBuffer> {
 
 		private LonLat ll;
 		private int zoom;
 
-		public ReadHgtFileTask(LonLat ll, int zoom) {
+		public ReadFileTask(LonLat ll, int zoom) {
 			this.ll = ll;
 			this.zoom = zoom;
 		}
 
 		public ByteBuffer call() throws Exception {
 			File f = FILES_LAYOUT.getFile(this.ll, this.zoom);
-			USED_FILES_STATS.add(FILES_LAYOUT.getKeyByFile(f));
+			usedFiles.add(FILES_LAYOUT.getKeyByFile(f));
 			if (!f.exists()) {
 				downloadTile();
 			}
@@ -131,6 +144,8 @@ public class FilesAccessService {
 	
 	private static class DeleteOldFilesTask implements Runnable {
 		
+		private static final Logger log = LoggerFactory.getLogger(DeleteOldFilesTask.class);
+		
 		public void run() {
 			File[] files = FILES_LAYOUT.listFiles();
 			
@@ -140,7 +155,7 @@ public class FilesAccessService {
 				while(filesList.size() > CACHED_FILES) {
 					File file = filesList.get(0);
 					String fileKey = FILES_LAYOUT.getKeyByFile(file);
-					if (!USED_FILES_STATS.contains(fileKey)) {
+					if (!usedFiles.contains(fileKey)) {
 						file.delete();
 						log.info("Delete {}", file);
 					}
@@ -169,7 +184,7 @@ public class FilesAccessService {
 			
 			future = futures.get(hgtKey);
 			if (future == null) {
-				future = fileReadES.submit(new ReadHgtFileTask(ll, zoom));
+				future = fileReadES.submit(new ReadFileTask(ll, zoom));
 				futures.put(hgtKey, future);
 			}
 		}		

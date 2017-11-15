@@ -2,22 +2,37 @@ package com.endpoint.cesium.terrain;
 
 import java.awt.Color;
 import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URL;
 import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
+import java.util.Properties;
 import java.util.zip.GZIPOutputStream;
 
 import javax.imageio.ImageIO;
 import javax.servlet.ServletOutputStream;
 
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.endpoint.cesium.terrain.tiling.GeodeticTilingScema;
+
 import freemarker.cache.ClassTemplateLoader;
 import freemarker.template.Configuration;
-import spark.Filter;
 import spark.ModelAndView;
 import spark.Request;
 import spark.Response;
@@ -25,37 +40,97 @@ import spark.Route;
 import spark.Spark;
 import spark.template.freemarker.FreeMarkerEngine;
 
-public class TileController {
+public class TerrainServer {
 	
-	private static final Logger log = LoggerFactory.getLogger(TileController.class);
+	private static final Logger log = LoggerFactory.getLogger(TerrainServer.class);
 	
 	private static final String TYPE_JSON = "application/json";
 	private static final String TYPE_PNG = "image/png";
 	// private static final String TYPE_QUANTIZED_MESH = "application/vnd.quantized-mesh";
 	private static final String TYPE_HEIGHTMAP = "application/octet-stream";
 	
-	private static final boolean GZIP = false;
-	private static final boolean REZERO = true;
+	private boolean GZIP = false;
+	private boolean REZERO = false;
+	
 	private static final CesiumHeightmapEncoder hgtmapEncoder = new CesiumHeightmapEncoder();
 	
 	private static final Configuration freeMarkerConfiguration = new Configuration(Configuration.VERSION_2_3_23);
 	static {
 		freeMarkerConfiguration.setDefaultEncoding("UTF-8");
-		freeMarkerConfiguration.setTemplateLoader(new ClassTemplateLoader(TileController.class, "/"));
+		freeMarkerConfiguration.setTemplateLoader(new ClassTemplateLoader(TerrainServer.class, "/"));
 	}
 	private static final FreeMarkerEngine freeMarkerEngine = new FreeMarkerEngine(freeMarkerConfiguration);
 	
-
-	public TileController(final TilesService tiles) {
+	private static final Properties config = new Properties();
+	
+	public static Properties getConfig() {
+		return TerrainServer.config;
+	}
+	
+	public static void main(String[] args) {
+		Options options = new Options();
 		
-		Spark.before(new Filter() {
+		options.addOption("c", "cfg", true, "Properties file path.");
+		
+		Option fetchPath = Option.builder("f").longOpt("fetch")
+			.hasArg().desc("Fetch tiles and save them by this path.").build();
+		options.addOption(fetchPath);
+		
+		Option fetchTo = Option.builder("l").longOpt("fetch-to")
+				.hasArg().desc("Fetch tiles up to this zoom level.").build();
+		options.addOption(fetchTo);
+		
+		Option fetchFrom = Option.builder("L").longOpt("fetch-from")
+				.hasArg().desc("Fetch tiles from this zoom level.").build();
+		options.addOption(fetchFrom);
+		
+		CommandLineParser parser = new DefaultParser();
+		CommandLine line = null;
+	    try {
+	        line = parser.parse( options, args );
+	    }
+	    catch( ParseException exp ) {
+	        System.err.println( "Can't parse command line options: " + exp.getMessage() );
+	    }
 
-			@Override
-			public void handle(Request request, Response response) throws Exception {
-				response.header("Access-Control-Allow-Origin", "*");
-			}
-			
-		});
+	    if (line != null) {
+	    	String propPath = line.getOptionValue("cfg", "terrain-server.properties");
+	    	try {
+		    	File propFile = new File(propPath);
+		    	if (propFile.exists()) {
+		    		config.load(new FileInputStream(propFile));
+		    	}
+		    	else {
+		    		config.load(TerrainServer.class.getResourceAsStream("/default.properties"));
+		    	}
+	    	} catch (IOException e) {
+	    		e.printStackTrace();
+	    	}
+	    	
+	    	new TerrainServer(new TilesService());
+	    	
+	    	if (line.hasOption("fetch")) {
+	    		String fetchPathValue = line.getOptionValue("fetch");
+	    		int fetchToValue = Integer.valueOf(line.getOptionValue("fetch-to", "16"));
+	    		int fetchFromValue = Integer.valueOf(line.getOptionValue("fetch-from", "4"));
+	    		
+	    		fetchTiles(fetchPathValue, fetchToValue, fetchFromValue);
+	    	}
+	    }
+	}
+
+	public TerrainServer(final TilesService tiles) {
+		
+		boolean corsEnabled = Boolean.valueOf(getConfig().getProperty("cors.enabled", "true"));
+
+		int port = Integer.parseInt(getConfig().getProperty("server.port", "4567"));
+		Spark.setPort(port);
+		
+		this.GZIP = Boolean.parseBoolean(getConfig().getProperty("server.gzip", "true"));
+		
+		if (corsEnabled) {
+			Spark.before(new CORSFilter());
+		}
 		
 		Spark.get("/terrain/heightmap/layer.json", new Route() {
 			public Object handle(Request req, Response res) {
@@ -63,7 +138,7 @@ public class TileController {
 					res.type(TYPE_JSON);
 					ServletOutputStream os = res.raw().getOutputStream();
 
-					InputStream is = TileController.class.getResourceAsStream("/layer.json");
+					InputStream is = TerrainServer.class.getResourceAsStream("/layer.json");
 					IOUtils.copy(is, os);
 					
 					res.raw().flushBuffer();
@@ -112,7 +187,12 @@ public class TileController {
 				}
 				
 				if("heightmap".equals(format)) {
+					if (z > 15) {
+						res.status(404);
+						return null;
+					}
 					writeHeightmap(res, tile);
+					
 					return null;
 				}
 				
@@ -127,9 +207,11 @@ public class TileController {
 			res.type(TYPE_HEIGHTMAP);
 			ServletOutputStream os = res.raw().getOutputStream();
 
-			InputStream is = TileController.class.getResourceAsStream("/zero-tile.terrain");
+			InputStream is = TerrainServer.class.getResourceAsStream("/zero-tile.terrain");
 			
 			if (GZIP) {
+				res.header("Content-Encoding", "gzip");
+				
 				IOUtils.copy(is, new GZIPOutputStream(os));
 			}
 			else {
@@ -146,10 +228,15 @@ public class TileController {
 		ByteBuffer bb = ByteBuffer.allocate(65 * 65 * 2 + 1 + 1);
 		
 		double[] eleSamples = tile.getEleSamples();
-		hgtmapEncoder.encodeToByteBuffer(bb, eleSamples, REZERO);
+		byte childMask = getChildMask(eleSamples, REZERO);
+
+		if(childMask == 0) {
+			res.status(404);
+			return;
+		}
 		
-		// Child mask
-		bb.put((byte)getChildMask(eleSamples, REZERO));
+		hgtmapEncoder.encodeToByteBuffer(bb, eleSamples, REZERO);
+		bb.put(childMask);
 		
 		// Water mask, all land for now
 		bb.put((byte)1);
@@ -159,6 +246,8 @@ public class TileController {
 			ServletOutputStream os = res.raw().getOutputStream();
 			
 			if(GZIP) {
+				res.header("Content-Encoding", "gzip");
+				
 				GZIPOutputStream gzos = new GZIPOutputStream(os);
 				gzos.write(bb.array());
 				gzos.flush();
@@ -221,7 +310,6 @@ public class TileController {
 		return (byte)bitmask;
 	}
 
-
 	private void writePngResponse(Response res, Tile tile) {
 		BufferedImage img = asImage(tile);					
 		try {
@@ -263,9 +351,37 @@ public class TileController {
 		}
 		return img;
 	}
-	
-	public static void main(String[] args) {
-		new TileController(new TilesService());
+
+	private static void fetchTiles(String fetchPathValue, int fetchToValue, int fetchFromValue) {
+		File tilesPath = new File(fetchPathValue);
+		
+		for (int z = fetchFromValue; z <= fetchToValue; z++) {
+			for (int y = 0; y < GeodeticTilingScema.yTiles(z); y++) {
+				for (int x = 0; x < GeodeticTilingScema.xTiles(z); x++) {
+					String tmsFileName = z + "/" + x + "/" + y + ".terrain";
+					File file = new File(tilesPath, tmsFileName);
+					file.getParentFile().mkdirs();
+					
+					if (!file.exists()) {
+						try {
+							URL url = new URL("http://localhost:4567/terrain/heightmap/" + tmsFileName);
+							ReadableByteChannel rbc = Channels.newChannel(url.openStream());
+							FileOutputStream fos = new FileOutputStream(file);
+							fos.getChannel().transferFrom(rbc, 0, Long.MAX_VALUE);
+							fos.close();
+						}
+						catch (FileNotFoundException fnf) {
+							// Do nothing
+						}
+						catch (Exception e) {
+							log.error("Failed to load {}", tmsFileName);
+						}
+					}
+				}
+			}
+		}
+		
+		log.info("All done");
+		System.exit(0);
 	}
-	
 }
